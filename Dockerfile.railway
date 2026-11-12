@@ -1,0 +1,53 @@
+# Railway trial build for Libredesk.
+# Fork: xdoctrine-sys/libredesk  |  Branch: trial/railway-tarshli-2026-11
+# Pinned source: tag v2.9.2 (commit dcd62c9c3e649085cc5cd868d6d33cfc8e1063ee)
+#
+# Why this file exists: the repository's own Dockerfile expects a pre-built
+# `libredesk` binary (goreleaser builds it before the image is created), so it
+# cannot be used by a build-from-source platform such as Railway. This
+# multi-stage file reproduces the release pipeline (frontend -> Go binary ->
+# stuffbin asset stuffing) so the image is built from this fork's source.
+#
+# Stage 1 - build the Vue frontend (admin app + chat widget + widget loader).
+FROM node:24-alpine AS frontend
+RUN npm install --global pnpm@11.28.8
+WORKDIR /src
+COPY . .
+RUN cd frontend \
+ && pnpm install --frozen-lockfile \
+ && pnpm build:main \
+ && pnpm build:widget \
+ && pnpm build:widget-loader
+
+# Stage 2 - build the Go binary and stuff the static assets into it.
+FROM golang:1.27-alpine AS backend
+RUN apk add --no-cache ca-certificates git
+ENV CGO_ENABLED=0
+WORKDIR /src
+COPY . .
+COPY --from=frontend /src/frontend/dist ./frontend/dist
+COPY --from=frontend /src/static/widget.min.js ./static/widget.min.js
+RUN go install github.com/knadh/stuffbin/... \
+ && go build \
+      -ldflags="-s -w \
+        -X 'main.buildString=v2.9.2 (railway-trial)' \
+        -X 'main.versionString=v2.9.2' \
+        -X 'github.com/abhinavxd/libredesk/internal/version.Version=v2.9.2'" \
+      -o libredesk ./cmd \
+ && "$(go env GOPATH)/bin/stuffbin" -a stuff -in libredesk -out libredesk \
+      frontend/dist i18n schema.sql static/email-templates static/public \
+      static/widget.min.js:static/widget.js
+
+# Stage 3 - minimal runtime.
+FROM alpine:3.18
+RUN apk --no-cache add ca-certificates tzdata
+WORKDIR /libredesk
+COPY --from=backend /src/libredesk ./libredesk
+COPY --from=backend /src/config.sample.toml ./config.toml
+# libredesk never creates the upload directory itself; attachments fail without it.
+RUN mkdir -p /libredesk/uploads
+EXPOSE 9000
+# Default command for a deployed container: apply pending migrations (idempotent,
+# it is a no-op when the schema is current) then serve. The one-time
+# `--install` is intentionally NOT part of this command.
+CMD ["sh", "-c", "./libredesk --upgrade --yes && exec ./libredesk"]
