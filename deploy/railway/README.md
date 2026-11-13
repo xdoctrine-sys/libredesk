@@ -61,6 +61,31 @@ sh -c "./libredesk --install --yes"
 Then read the deploy logs for `database schema installed successfully`, remove the
 override and redeploy so the service returns to the normal command above.
 
+## Build path (required - do not let it drift)
+
+The repository contains two Dockerfiles:
+
+* `Dockerfile` - upstream, expects a pre-built `libredesk` binary produced by
+  goreleaser. A build from source **fails** on it with
+  `COPY libredesk . ... "/libredesk": not found`.
+* `Dockerfile.railway` - the file this trial must be built with.
+
+Railway ignores `railway.json` for this service (`railwayConfigFile` is null),
+so the effective setting is the service build configuration. Keep it at
+`Dockerfile.railway`:
+
+* service build setting: `build.dockerfilePath = Dockerfile.railway`
+  (verified with `railway api 'query { serviceInstance(serviceId: "...", environmentId: "...") { builder dockerfilePath railwayConfigFile } }'`)
+* belt-and-braces build override variable: `RAILWAY_DOCKERFILE_PATH=Dockerfile.railway`
+
+`railway redeploy` re-runs the **previous deployment's build manifest**, so it
+silently keeps a stale `dockerfilePath` even after the setting is corrected.
+After changing the build path, create a fresh deployment instead:
+
+```
+railway api 'mutation { serviceInstanceDeploy(serviceId: "<serviceId>", environmentId: "<environmentId>", latestCommit: true) }'
+```
+
 ## Redeploy / upgrade
 
 1. Push the new commit to the trial branch.
@@ -68,6 +93,8 @@ override and redeploy so the service returns to the normal command above.
 3. The container command runs `--upgrade --yes` before serving, which applies
    pending migrations and is a no-op when the schema is current. It never
    re-installs and never wipes data.
+4. Verify the build used `Dockerfile.railway`: the build log must show the
+   frontend stage (`pnpm build:main`), not `COPY libredesk .`.
 
 ## Stopping the trial later
 
